@@ -6,6 +6,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from "react"
 import { createClient } from "@/lib/supabase/client"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Send, Paperclip, Loader2, MessageSquare, AlertTriangle, Mic, MicOff } from "lucide-react"
 import { useSpeechInput } from "@/hooks/use-speech-input"
 import { useTextToSpeech } from "@/hooks/use-text-to-speech"
@@ -15,13 +16,12 @@ import { useVirtualizer } from "@tanstack/react-virtual"
 import { FileUpload } from "./file-upload"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 
-interface Message {
-  id: string
-  role: "user" | "assistant"
-  content: string
-  file_urls?: string[]
-  created_at: string
-}
+import type {
+  ChatMessageRecord,
+  StructuredResponse,
+  StoredAssistantPayload,
+  ModelSummary,
+} from "./types"
 
 interface ChatInterfaceProps {
   userId: string
@@ -29,23 +29,134 @@ interface ChatInterfaceProps {
   onNewThread?: (threadId: string) => void
 }
 
+
+const MODEL_OPTIONS = [
+  {
+    value: "distilgpt2",
+    label: "MedAlpaca (DistilGPT-2)",
+    description: "Fast, lightweight open-source model for medical Q&A.",
+  },
+  {
+    value: "gemini",
+    label: "Gemini (Google API)",
+    description: "Google Gemini Pro for medical Q&A (API key required).",
+  },
+] as const
+
+
+type ModelKey = "distilgpt2" | "gemini"
+const DEFAULT_MODEL: ModelKey = "distilgpt2"
+
+const MODEL_LOOKUP: Record<ModelKey, (typeof MODEL_OPTIONS)[number]> = {
+  distilgpt2: MODEL_OPTIONS[0],
+  gemini: MODEL_OPTIONS[1],
+}
+
+const STRUCTURED_PAYLOAD_TYPE = "structured-response" as const
+
+const isStringArray = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((item) => typeof item === "string")
+
+const isEntityMap = (value: unknown): value is Record<string, string[]> => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false
+  return Object.values(value).every((entry) => isStringArray(entry))
+}
+
+const deriveDisplayText = (structured?: StructuredResponse | null): string => {
+  if (!structured) return ""
+  const content = structured.content ?? {}
+  if (!content || typeof content !== "object") return structured.model
+
+  const summary = typeof (content as Record<string, unknown>).summary === "string"
+    ? (content as Record<string, unknown>).summary?.toString().trim()
+    : ""
+  if (summary) return summary
+
+  const answer = typeof (content as Record<string, unknown>).answer === "string"
+    ? (content as Record<string, unknown>).answer?.toString().trim()
+    : ""
+  if (answer) return answer
+
+  const possibleCauses = (content as Record<string, unknown>).possible_causes
+  if (isStringArray(possibleCauses) && possibleCauses.length > 0) {
+    const preview = possibleCauses.slice(0, 3).join(", ")
+    return `Possible causes: ${preview}${possibleCauses.length > 3 ? "…" : ""}`
+  }
+
+  const entitiesValue = (content as Record<string, unknown>).entities
+  if (isEntityMap(entitiesValue)) {
+    const summaryItems = Object.entries(entitiesValue)
+      .filter(([, items]) => items.length > 0)
+      .slice(0, 3)
+      .map(([key, items]) => `${key}: ${items.slice(0, 2).join(", ")}${items.length > 2 ? "…" : ""}`)
+    if (summaryItems.length > 0) {
+      return `Entities detected — ${summaryItems.join("; ")}`
+    }
+  }
+
+  return structured.model
+}
+
+const parseAssistantPayload = (
+  raw: string,
+): { structured?: StructuredResponse; text: string; modelInfo?: ModelSummary } => {
+  if (!raw) return { text: "" }
+
+  try {
+    const parsed = JSON.parse(raw) as StoredAssistantPayload | StructuredResponse
+
+    if (parsed && typeof parsed === "object" && "type" in parsed) {
+      const payload = parsed as StoredAssistantPayload
+      if (payload.type === STRUCTURED_PAYLOAD_TYPE && payload.structuredResponse) {
+        const textCandidates: Array<string | undefined> = [
+          payload.text,
+          payload.directAnswer,
+          deriveDisplayText(payload.structuredResponse),
+        ]
+        const text = textCandidates.find((candidate) => typeof candidate === "string" && candidate.trim().length > 0)
+          ?.trim() ?? ""
+        return {
+          structured: payload.structuredResponse,
+          text,
+          modelInfo: payload.modelInfo,
+        }
+      }
+    }
+
+    if (parsed && typeof parsed === "object" && "model" in parsed && "content" in parsed) {
+      const structured = parsed as StructuredResponse
+      return {
+        structured,
+        text: deriveDisplayText(structured),
+      }
+    }
+  } catch (error) {
+    console.error("Failed to parse assistant payload", error)
+  }
+
+  return { text: raw }
+}
+
 export function ChatInterface({ userId, threadId, onNewThread }: ChatInterfaceProps) {
-  const [messages, setMessages] = useState<Message[]>([])
+  const [messages, setMessages] = useState<ChatMessageRecord[]>([])
   const [input, setInput] = useState("")
   const [isLoading, setIsLoading] = useState(false)
   const [showFileUpload, setShowFileUpload] = useState(false)
   const [uploadedFiles, setUploadedFiles] = useState<string[]>([])
   const [rateLimitError, setRateLimitError] = useState<string | null>(null)
+  const [selectedModel, setSelectedModel] = useState<ModelKey>(DEFAULT_MODEL)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const supabase = createClient()
+  const activeModel = MODEL_LOOKUP[selectedModel]
+  const handleModelChange = (value: string) => setSelectedModel(value as ModelKey)
   // Scroll position persistence per thread
   const scrollPositionsRef = useRef<Record<string, number>>({})
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const autoScrollRef = useRef(true)
   const [showNewMessages, setShowNewMessages] = useState(false)
   const { supported: speechSupported, listening, interim, final, start: startSpeech, stop: stopSpeech, reset: resetSpeech } = useSpeechInput({ interim: true })
-  const { supported: ttsSupported, speak, cancel: cancelTTS } = useTextToSpeech()
+  const { supported: ttsSupported, speak } = useTextToSpeech()
   // Flag indicating next assistant response should be spoken
   const speakNextRef = useRef(false)
 
@@ -91,6 +202,39 @@ export function ChatInterface({ userId, threadId, onNewThread }: ChatInterfacePr
   })
 
   // Load messages & restore scroll position
+  const loadMessages = useCallback(async () => {
+    if (!threadId) {
+      setMessages([])
+      return
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from("messages")
+        .select("*")
+        .eq("thread_id", threadId)
+        .order("created_at", { ascending: true })
+
+      if (error) throw error
+      const mapped = (data || []).map((message) => {
+        const base = message as ChatMessageRecord
+        if (base.role === "assistant") {
+          const parsed = parseAssistantPayload(base.content)
+          return {
+            ...base,
+            content: parsed.text,
+            structured: parsed.structured,
+            modelInfo: parsed.modelInfo ?? base.modelInfo,
+          }
+        }
+        return base
+      })
+      setMessages(mapped)
+    } catch (error) {
+      console.error("Error loading messages:", error)
+    }
+  }, [supabase, threadId])
+
   useEffect(() => {
     let cancelled = false
     const run = async () => {
@@ -99,15 +243,15 @@ export function ChatInterface({ userId, threadId, onNewThread }: ChatInterfacePr
         // Restore scroll top after a frame so content height is laid out
         requestAnimationFrame(() => {
           if (cancelled) return
-            const el = scrollContainerRef.current
-            if (el && threadId && scrollPositionsRef.current[threadId] != null) {
-              el.scrollTop = scrollPositionsRef.current[threadId]
-              const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
-              autoScrollRef.current = atBottom
-            } else {
-              autoScrollRef.current = true
-              messagesEndRef.current?.scrollIntoView({ behavior: "auto" })
-            }
+          const el = scrollContainerRef.current
+          if (el && threadId && scrollPositionsRef.current[threadId] != null) {
+            el.scrollTop = scrollPositionsRef.current[threadId]
+            const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+            autoScrollRef.current = atBottom
+          } else {
+            autoScrollRef.current = true
+            messagesEndRef.current?.scrollIntoView({ behavior: "auto" })
+          }
         })
       } else {
         setMessages([])
@@ -117,7 +261,7 @@ export function ChatInterface({ userId, threadId, onNewThread }: ChatInterfacePr
     return () => {
       cancelled = true
     }
-  }, [threadId])
+  }, [threadId, loadMessages])
 
   useEffect(() => {
     const el = scrollContainerRef.current
@@ -134,7 +278,7 @@ export function ChatInterface({ userId, threadId, onNewThread }: ChatInterfacePr
     }
     el.addEventListener("scroll", handler, { passive: true })
     return () => el.removeEventListener("scroll", handler)
-  }, [])
+  }, [threadId])
 
   useEffect(() => {
     if (autoScrollRef.current) {
@@ -144,23 +288,6 @@ export function ChatInterface({ userId, threadId, onNewThread }: ChatInterfacePr
       setShowNewMessages(true)
     }
   }, [messages])
-
-  const loadMessages = async () => {
-    if (!threadId) return
-
-    try {
-      const { data, error } = await supabase
-        .from("messages")
-        .select("*")
-        .eq("thread_id", threadId)
-        .order("created_at", { ascending: true })
-
-      if (error) throw error
-      setMessages(data || [])
-    } catch (error) {
-      console.error("Error loading messages:", error)
-    }
-  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -173,7 +300,7 @@ export function ChatInterface({ userId, threadId, onNewThread }: ChatInterfacePr
     setUploadedFiles([])
 
     try {
-      const tempUserMessage: Message = {
+      const tempUserMessage: ChatMessageRecord = {
         id: `temp-${Date.now()}`,
         role: "user",
         content: userMessage,
@@ -192,6 +319,7 @@ export function ChatInterface({ userId, threadId, onNewThread }: ChatInterfacePr
           fileUrls: uploadedFiles,
           threadId,
           userId,
+          modelKey: selectedModel,
         }),
       })
 
@@ -208,10 +336,47 @@ export function ChatInterface({ userId, threadId, onNewThread }: ChatInterfacePr
 
       const data = await response.json()
 
-      const assistantMessage: Message = {
+      const directAnswer = typeof data.directAnswer === "string" && data.directAnswer.trim().length > 0
+        ? data.directAnswer.trim()
+        : typeof data.answer === "string" && data.answer.trim().length > 0
+          ? data.answer.trim()
+          : undefined
+      const structured: StructuredResponse | undefined = data.structuredResponse
+      const displayText = directAnswer
+        || (structured ? deriveDisplayText(structured) : "")
+        || (typeof data.response === "string" ? data.response : "")
+
+      const backendModelInfo = (data.modelInfo as ModelSummary | undefined) ?? undefined
+      const derivedModelInfo = backendModelInfo
+        ?? (() => {
+          if (structured && typeof structured.model === "string") {
+            const normalized = structured.model.trim()
+            if (normalized.length > 0) {
+              return {
+                key: normalized,
+                name: normalized,
+                badge: normalized,
+                mode: structured.mode,
+              } as ModelSummary
+            }
+          }
+          const option = MODEL_LOOKUP[selectedModel]
+          if (option) {
+            return {
+              key: selectedModel,
+              name: option.label,
+              badge: option.label,
+            } as ModelSummary
+          }
+          return undefined
+        })()
+
+      const assistantMessage: ChatMessageRecord = {
         id: data.messageId || `temp-assistant-${Date.now()}`,
         role: "assistant",
-        content: data.response,
+        content: displayText,
+        structured,
+        modelInfo: derivedModelInfo,
         created_at: new Date().toISOString(),
       }
 
@@ -296,6 +461,28 @@ export function ChatInterface({ userId, threadId, onNewThread }: ChatInterfacePr
 
   return (
     <div className="flex flex-col h-full">
+      <div className="max-w-4xl mx-auto w-full pt-2 pb-1 px-2">
+        <div className="flex flex-col md:flex-row md:items-center gap-2 md:gap-4">
+          <div className="flex-1 min-w-0">
+            <Select value={selectedModel} onValueChange={handleModelChange}>
+              <SelectTrigger className="w-full md:w-72 bg-slate-800 border-slate-700 text-white">
+                <SelectValue placeholder="Select AI Model" />
+              </SelectTrigger>
+              <SelectContent>
+                {MODEL_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value} className="flex flex-col gap-0.5">
+                    <span className="font-medium">{option.label}</span>
+                    <span className="text-xs text-slate-400">{option.description}</span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex-1 min-w-0 hidden md:block">
+            <span className="text-xs text-slate-400">{activeModel?.description}</span>
+          </div>
+        </div>
+      </div>
       <div
         ref={scrollContainerRef}
         className="flex-1 overflow-y-auto p-4 pr-2 scrollbar-thin scrollbar-track-slate-900 scrollbar-thumb-slate-700 hover:scrollbar-thumb-slate-600"
