@@ -9,7 +9,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .base import BaseMedicalModel
-from config import ensure_allowed_model_name, get_model_cache_dir, get_timeout_seconds, with_cache_dir
+from ..config import ensure_allowed_model_name, get_model_cache_dir, get_timeout_seconds, with_cache_dir
 
 # Simple symptom heuristics used by the fallback pathway.  Each entry
 # contains a set of keywords and the structured response we want to surface.

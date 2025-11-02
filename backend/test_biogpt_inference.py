@@ -1,29 +1,35 @@
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+import os
+import sys
+import json
 
-MODEL_NAME = "google/flan-t5-small"
+# Add the backend directory to the path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-prompt = "What should I do if I have a high fever and sore throat?"
+# Set environment variables for testing
+os.environ["BIOGPT_MODE"] = "inference"
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Using device: {device}")
+# Import directly from the models module
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+from backend.models.biogpt import BioGPTModel
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-model = AutoModelForCausalLM.from_pretrained(MODEL_NAME).to(device)
+# Test the BioGPT model
+model = BioGPTModel()
 
+prompts = [
+    "i have high blood sugar and feel tired",
+    "i have nocturia",
+    "i have itchy skin",
+    "i have thirst",
+    "i have a headache",
+    ""
+]
 
+for prompt in prompts:
+    print(f"\nTesting BioGPT with prompt: '{prompt}'")
 
-inputs = tokenizer(prompt, return_tensors="pt").to(device)
-print("Input tensor shape:", inputs["input_ids"].shape)
-output = model.generate(
-	**inputs,
-	max_length=50,
-	do_sample=True,
-	temperature=0.9,
-	top_p=0.95,
-	num_return_sequences=1
-)
-raw_text = tokenizer.decode(output[0], skip_special_tokens=True)
+    response = model.generate_response(prompt)
 
-print("\n=== BioGPT Output ===\n")
-print(raw_text)
+    print("\n=== BioGPT Response ===\n")
+    print("Content:", json.dumps(response.get("content", {}), indent=2))
+    print("Metadata:", json.dumps(response.get("metadata", {}), indent=2))
+    print("Warnings:", response.get("warnings", []))

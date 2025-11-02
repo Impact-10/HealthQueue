@@ -7,7 +7,7 @@ import time
 
 import torch
 
-from config import get_model_mode, is_inference_enabled
+from ..config import get_model_mode, is_inference_enabled
 
 
 class BaseMedicalModel(ABC):

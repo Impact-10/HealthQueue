@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 "use client"
 
 import type React from "react"
@@ -15,6 +16,7 @@ import { ChatMessage } from "./chat-message"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import { FileUpload } from "./file-upload"
 import { Alert, AlertDescription } from "@/components/ui/alert"
+import { ClientOnly } from "../client-only";
 
 import type {
   ChatMessageRecord,
@@ -41,16 +43,22 @@ const MODEL_OPTIONS = [
     label: "Gemini (Google API)",
     description: "Google Gemini Pro for medical Q&A (API key required).",
   },
-] as const
+  {
+    value: "biogpt",
+    label: "BioGPT (Diabetology)",
+    description: "Generative biomedical model tuned for diabetes-focused Q&A.",
+  },
+] as const;
 
-
-type ModelKey = "distilgpt2" | "gemini"
-const DEFAULT_MODEL: ModelKey = "distilgpt2"
+type ModelKey = "distilgpt2" | "gemini" | "biogpt"; // add biogpt
+const DEFAULT_MODEL: ModelKey = "distilgpt2";
 
 const MODEL_LOOKUP: Record<ModelKey, (typeof MODEL_OPTIONS)[number]> = {
   distilgpt2: MODEL_OPTIONS[0],
   gemini: MODEL_OPTIONS[1],
-}
+  biogpt: MODEL_OPTIONS[2],
+};
+
 
 const STRUCTURED_PAYLOAD_TYPE = "structured-response" as const
 
@@ -331,9 +339,17 @@ export function ChatInterface({ userId, threadId, onNewThread }: ChatInterfacePr
       }
 
       if (!response.ok) {
-        throw new Error("Failed to send message")
-      }
-
+  let detail = "Failed to send message";
+  try {
+    const err = await response.json();
+    detail = err?.error || err?.body || JSON.stringify(err);
+  } catch {
+    try { detail = await response.text(); } catch {}
+  }
+  console.error("Chat API 502 detail:", detail);
+  setRateLimitError(typeof detail === "string" ? detail : "Service unavailable");
+  throw new Error(detail);
+}
       const data = await response.json()
 
       const directAnswer = typeof data.directAnswer === "string" && data.directAnswer.trim().length > 0
@@ -436,7 +452,7 @@ export function ChatInterface({ userId, threadId, onNewThread }: ChatInterfacePr
           position: "relative",
         }}
       >
-        {virtualItems.map((vi) => {
+        {virtualItems.map((vi: { index: number; start: number }) => {
           const msg = messages[vi.index]
           return (
             <div
@@ -464,19 +480,21 @@ export function ChatInterface({ userId, threadId, onNewThread }: ChatInterfacePr
       <div className="max-w-4xl mx-auto w-full pt-2 pb-1 px-2">
         <div className="flex flex-col md:flex-row md:items-center gap-2 md:gap-4">
           <div className="flex-1 min-w-0">
-            <Select value={selectedModel} onValueChange={handleModelChange}>
-              <SelectTrigger className="w-full md:w-72 bg-slate-800 border-slate-700 text-white">
-                <SelectValue placeholder="Select AI Model" />
-              </SelectTrigger>
-              <SelectContent>
-                {MODEL_OPTIONS.map((option) => (
-                  <SelectItem key={option.value} value={option.value} className="flex flex-col gap-0.5">
-                    <span className="font-medium">{option.label}</span>
-                    <span className="text-xs text-slate-400">{option.description}</span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <ClientOnly>
+              <Select value={selectedModel} onValueChange={handleModelChange}>
+                <SelectTrigger className="w-full md:w-72 bg-slate-800 border-slate-700 text-white">
+                  <SelectValue placeholder="Select AI Model" />
+                </SelectTrigger>
+                <SelectContent>
+                  {MODEL_OPTIONS.map((option) => (
+                    <SelectItem key={option.value} value={option.value} className="flex flex-col gap-0.5">
+                      <span className="font-medium">{option.label}</span>
+                      <span className="text-xs text-slate-400">{option.description}</span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </ClientOnly>
           </div>
           <div className="flex-1 min-w-0 hidden md:block">
             <span className="text-xs text-slate-400">{activeModel?.description}</span>

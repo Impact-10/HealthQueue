@@ -4,7 +4,6 @@ import Link from "next/link"
 export const dynamic = 'force-dynamic'
 export const metadata = { title: 'Doctor Consultation' }
 
-// @ts-ignore - recent file addition sometimes not picked up by incremental analyzer
 import DoctorChatClient from "./doctor-chat-client"
 
 export default async function DoctorChatPage() {

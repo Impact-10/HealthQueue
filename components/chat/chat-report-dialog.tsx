@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 "use client"
 
 import { useState } from "react"
@@ -61,7 +62,7 @@ export function ChatReportDialog({ threadId, userId, disabled }: ChatReportDialo
   }
 
   return (
-    <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (o && !report && !loading && threadId) generate() }}>
+    <Dialog open={open} onOpenChange={(o: boolean | ((prevState: boolean) => boolean)) => { setOpen(o); if (o && !report && !loading && threadId) generate() }}>
       <DialogTrigger asChild>
         <Button variant="outline" size="sm" disabled={!threadId || disabled} className="gap-1"> <FileText className="h-4 w-4"/> Report </Button>
       </DialogTrigger>

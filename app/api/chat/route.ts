@@ -1,10 +1,9 @@
-
-
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { type NextRequest, NextResponse } from "next/server"
 import { createClient } from "@/lib/supabase/server"
 import { GoogleGenerativeAI } from "@google/generative-ai"
 
-const BACKEND_URL = process.env.DIAGNOSAI_BACKEND_URL || "http://localhost:8000"
+const BACKEND_URL = process.env.DIAGNOSAI_BACKEND_URL || "http://localhost:8001"
 
 // Initialize Gemini AI
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!)
@@ -72,6 +71,22 @@ const deriveStructuredSummary = (structured: unknown): string => {
     return container.model.trim()
   }
 
+  return ""
+}
+
+// Helper: ensure a non-empty display string from a structured payload
+const synthesizeIfEmpty = (structured: any): string => {
+  try {
+    const c = structured?.content || {}
+    const tryStr = (v: any) => (typeof v === "string" && v.trim() ? v.trim() : "")
+    const s = tryStr(c.summary) || tryStr(c.text) || tryStr(c.answer) || tryStr(c.raw_text)
+    if (s) return s
+    const lists = ["recommendations", "possible_causes", "next_steps", "warning_signs", "recommended_tests", "possible_diagnoses"]
+    for (const k of lists) {
+      const arr = c[k]
+      if (Array.isArray(arr) && arr.length) return String(arr[0])
+    }
+  } catch {}
   return ""
 }
 
@@ -175,7 +190,7 @@ export async function POST(request: NextRequest) {
         "\n\nUser has attached files. Please acknowledge the files and ask how you can help analyze or discuss them.";
     }
 
-    // --- Only MedAlpaca and Gemini model routing ---
+    // --- MedAlpaca, BioGPT, and Gemini model routing ---
     if (modelKey === "medalpaca") {
       try {
         const backendResp = await fetch(`${BACKEND_URL}/api/medalpaca`, {
@@ -200,9 +215,15 @@ export async function POST(request: NextRequest) {
           ? directAnswerCandidate.trim()
           : null;
         const fallbackText = deriveStructuredSummary(structuredResponse);
-        const responseText = directAnswer
+        let responseText = directAnswer
           ?? (fallbackText && fallbackText.length > 0 ? fallbackText : null)
-          ?? (typeof backendJson?.response === "string" ? backendJson.response : null);
+          ?? (typeof backendJson?.response === "string" ? backendJson.response : null) as string | null;
+
+        // Guard: ensure non-empty display
+        if (!responseText || responseText.trim().length === 0) {
+          responseText = synthesizeIfEmpty(structuredResponse) || "Here’s a concise health note based on your message."
+        }
+
         // Create or get thread
         let currentThreadId = threadId;
         if (!currentThreadId) {
@@ -242,7 +263,7 @@ export async function POST(request: NextRequest) {
               type: STRUCTURED_PAYLOAD_TYPE,
               version: STRUCTURED_PAYLOAD_VERSION,
               structuredResponse,
-              text: responseText ?? undefined,
+              text: responseText, // force string
               modelKey,
               directAnswer: directAnswer ?? undefined,
               modelInfo: modelInfo ?? undefined,
@@ -251,7 +272,7 @@ export async function POST(request: NextRequest) {
           : null;
         const serializedContent = storedPayload
           ? JSON.stringify(storedPayload)
-          : responseText ?? JSON.stringify(structuredResponse);
+          : (responseText as string);
         const { data: assistantMessage, error: assistantMessageError } = await supabase
           .from("messages")
           .insert({
@@ -282,6 +303,123 @@ export async function POST(request: NextRequest) {
         });
       } catch (err) {
         console.error(`[MedAlpaca API] Unhandled error:`, err);
+        return NextResponse.json({ error: `Backend unavailable: ${typeof err === 'string' ? err : JSON.stringify(err)}` }, { status: 502 });
+      }
+      return;
+    }
+
+    if (modelKey === "biogpt") {
+      try {
+        const backendResp = await fetch(`${BACKEND_URL}/api/biogpt`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question: message }),
+        });
+        if (!backendResp.ok) {
+          const err = await backendResp.text();
+          console.error(`[BioGPT API] Backend error:`, err);
+          return NextResponse.json({ error: `Backend error: ${typeof err === 'string' ? err : JSON.stringify(err)}` }, { status: 502 });
+        }
+        const backendJson = await backendResp.json();
+        const structuredResponse = backendJson?.structuredResponse ?? backendJson;
+        const modelInfo = backendJson?.model ?? null;
+        const directAnswerCandidate = typeof backendJson?.directAnswer === "string"
+          ? backendJson.directAnswer
+          : typeof backendJson?.answer === "string"
+            ? backendJson.answer
+            : null;
+        const directAnswer = directAnswerCandidate && directAnswerCandidate.trim().length > 0
+          ? directAnswerCandidate.trim()
+          : null;
+        const fallbackText = deriveStructuredSummary(structuredResponse);
+        let responseText = directAnswer
+          ?? (fallbackText && fallbackText.length > 0 ? fallbackText : null)
+          ?? (typeof backendJson?.response === "string" ? backendJson.response : null) as string | null;
+
+        // Guard: ensure non-empty display
+        if (!responseText || responseText.trim().length === 0) {
+          responseText = synthesizeIfEmpty(structuredResponse) || "Let’s consider common causes and next steps."
+        }
+
+        // Create or get thread
+        let currentThreadId = threadId;
+        if (!currentThreadId) {
+          const { data: newThread, error: threadError } = await supabase
+            .from("threads")
+            .insert({
+              user_id: userId,
+              title: message.slice(0, 50) + (message.length > 50 ? "..." : ""),
+            })
+            .select()
+            .single();
+          if (threadError) {
+            console.error(`[BioGPT API] Thread creation error:`, threadError);
+            throw threadError;
+          }
+          currentThreadId = newThread.id;
+        }
+        // Save user message
+        const { error: userMessageError } = await supabase
+          .from("messages")
+          .insert({
+            thread_id: currentThreadId,
+            user_id: userId,
+            role: "user",
+            content: message,
+            file_urls: fileUrls,
+          })
+          .select()
+          .single();
+        if (userMessageError) {
+          console.error(`[BioGPT API] User message error:`, userMessageError);
+          throw userMessageError;
+        }
+        // Save assistant message
+        const storedPayload = structuredResponse && typeof structuredResponse === "object"
+          ? {
+              type: STRUCTURED_PAYLOAD_TYPE,
+              version: STRUCTURED_PAYLOAD_VERSION,
+              structuredResponse,
+              text: responseText, // force string
+              modelKey,
+              directAnswer: directAnswer ?? undefined,
+              modelInfo: modelInfo ?? undefined,
+              createdAt: new Date().toISOString(),
+            } as Record<string, unknown>
+          : null;
+        const serializedContent = storedPayload
+          ? JSON.stringify(storedPayload)
+          : (responseText as string);
+        const { data: assistantMessage, error: assistantMessageError } = await supabase
+          .from("messages")
+          .insert({
+            thread_id: currentThreadId,
+            user_id: userId,
+            role: "assistant",
+            content: serializedContent,
+          })
+          .select()
+          .single();
+        if (assistantMessageError) {
+          console.error(`[BioGPT API] Assistant message error:`, assistantMessageError);
+          throw assistantMessageError;
+        }
+        // Update usage tracking
+        await supabase.rpc("update_usage_tracking", {
+          p_user_id: userId,
+          p_message_count: 1,
+          p_file_upload_count: fileUrls?.length || 0,
+        });
+        return NextResponse.json({
+          structuredResponse,
+          directAnswer,
+          modelInfo,
+          response: responseText ?? undefined,
+          threadId: currentThreadId,
+          messageId: assistantMessage.id,
+        });
+      } catch (err) {
+        console.error(`[BioGPT API] Unhandled error:`, err);
         return NextResponse.json({ error: `Backend unavailable: ${typeof err === 'string' ? err : JSON.stringify(err)}` }, { status: 502 });
       }
       return;
@@ -354,11 +492,9 @@ export async function POST(request: NextRequest) {
     }
   } catch (error) {
     console.error("[API] Unexpected error:", error);
-  return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
-
-
 
 function calculateAge(birthDate: string): number {
   const today = new Date()

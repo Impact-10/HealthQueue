@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
-from models import MedAlpacaModel
+from backend.models import MedAlpacaModel
 
 app = FastAPI(title="HealthQueue Medical AI API")
 
@@ -22,10 +22,12 @@ models = {}
 def get_model(model_name: str):
     # Only MedAlpaca and Gemini supported
     if model_name not in models:
-        if model_name in ["medalpaca", "biogpt"]:
-            class PatchedMedAlpacaModel(MedAlpacaModel):
-                pass  # No override needed; use MedAlpacaModel's generate_response
-            models[model_name] = PatchedMedAlpacaModel()
+        if model_name == "medalpaca":
+            from backend.models import MedAlpacaModel
+            models[model_name] = MedAlpacaModel()
+        elif model_name == "biogpt":
+            from backend.models import BioGPTModel
+            models[model_name] = BioGPTModel()
         elif model_name == "gemini":
             class GeminiModel:
                 def generate_response(self, prompt, **kwargs):
