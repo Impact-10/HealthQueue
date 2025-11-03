@@ -12,7 +12,6 @@ export const metadata: Metadata = {
   description: 'DiagonsAI - AI assisted health insights, consultations, and wellness intelligence.',
   generator: 'DiagonsAI',
   applicationName: 'DiagonsAI',
-  icons: [{ rel: 'icon', url: '/favicon.ico' }],
 }
 
 export default function RootLayout({
@@ -29,3 +28,4 @@ export default function RootLayout({
     </html>
   )
 }
+

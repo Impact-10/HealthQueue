@@ -14,9 +14,10 @@ def setup():
     """Setup environment and download models"""
     # Load environment variables
     load_dotenv()
-    
-    # Download models
-    download_models()
+
+    # Download models only if not in fallback mode
+    if os.getenv("MEDALPACA_MODE") != "fallback":
+        download_models()
 
 def main():
     """Start the backend server"""

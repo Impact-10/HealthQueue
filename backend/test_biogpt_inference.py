@@ -10,7 +10,7 @@ os.environ["BIOGPT_MODE"] = "inference"
 
 # Import directly from the models module
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-from backend.models.biogpt import BioGPTModel
+from models.biogpt import BioGPTModel
 
 # Test the BioGPT model
 model = BioGPTModel()

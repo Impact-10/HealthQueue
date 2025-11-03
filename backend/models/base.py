@@ -7,7 +7,7 @@ import time
 
 import torch
 
-from ..config import get_model_mode, is_inference_enabled
+from config import get_model_mode, is_inference_enabled
 
 
 class BaseMedicalModel(ABC):
@@ -118,31 +118,32 @@ class BaseMedicalModel(ABC):
     # ------------------------------------------------------------------
     # Response helpers
     # ------------------------------------------------------------------
-    def build_response(
-        self,
-        *,
-        content: Any,
-        metadata: Optional[Dict[str, Any]] = None,
-        warnings: Optional[list[str]] = None,
-        extra: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Create a consistent response envelope used by the API."""
-
-        response: Dict[str, Any] = {
+    def build_response(self, *, content: Dict[str, Any], metadata: Optional[Dict[str, Any]]=None, warnings: Optional[Any]=None, extra: Optional[Any]=None) -> Dict[str, Any]:
+        md = metadata or {}
+        wrn = warnings
+        if wrn is None:
+            wrn_list = []
+        elif isinstance(wrn, list):
+            wrn_list = wrn
+        else:
+            wrn_list = [str(wrn)]
+        extra_dict: Dict[str, Any]
+        if isinstance(extra, dict):
+            extra_dict = extra
+        elif extra is None:
+            extra_dict = {}
+        else:
+            # wrap scalar/list extras safely
+            extra_dict = {"extra": extra}
+        return {
             "model": self.model_key,
-            "mode": self.fallback_label if self.use_fallback() else self.inference_label,
+            "mode": md.get("mode","inference"),
             "content": content,
-            "metadata": metadata or {},
+            "metadata": md,
+            "warnings": wrn_list,
+            **extra_dict,
         }
 
-        if warnings:
-            response["warnings"] = warnings
-        if extra:
-            response.update(extra)
-        if self._last_error and self.use_fallback():
-            response.setdefault("metadata", {})["last_error"] = self._last_error
-
-        return response
 
     def get_model_info(self) -> Dict[str, Any]:
         """Return runtime information useful for health checks."""
