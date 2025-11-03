@@ -3,23 +3,29 @@ import os, json, re
 from typing import Any, Dict, Optional
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
 from .base import BaseMedicalModel
 
 JSON_BEGIN = "<json>"
 JSON_END = "</json>"
 
-DIAGNOSIS_PROMPT = (
-    "You are a biomedical assistant specialized in diabetology.\n"
-    "Return ONLY a JSON object with keys exactly:\n"
-    '  "summary": string,\n'
-    '  "possible_diagnoses": string[],\n'
-    '  "rationale": string[],\n'
-    '  "recommended_tests": string[],\n'
-    '  "next_steps": string[],\n'
-    '  "warning_signs": string[]\n'
-    "No extra text before or after the JSON.\n\n"
-    "Patient symptoms and history:\n{symptoms}\n"
-)
+def _read_fewshots(path: str, limit: int = 100) -> str:
+    try:
+        lines = []
+        with open(path, "r", encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                if i >= limit: break
+                obj = json.loads(line)
+                q = (obj.get("question") or "").strip()
+                a = (obj.get("answer_json") or "").strip()
+                if not a.startswith("{"): a = a  # already JSON string
+                lines.append(f"Example:\n{JSON_BEGIN}\n{a}\n{JSON_END}\n")
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"[BioGPT] fewshots read error: {e}")
+        return ""
+
+
 STOP_SEQS = ["\nPatient:", "\nAssistant:", "\nUser:"]
 
 class BioGPTModel(BaseMedicalModel):
@@ -30,26 +36,44 @@ class BioGPTModel(BaseMedicalModel):
         self._pad_token_id = None
 
     def _load_resources(self) -> None:
-        print(f"[BioGPT] Loading from: {self.model_name}")
-        dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        print(f"[BioGPT] Loading adapters from: {self.model_name}")
+        # Base name can be HF id or a local folder; change if you have a local mirror.
+        base_name = os.getenv("BASE_MODEL", "microsoft/BioGPT")
+        print("[BioGPT] BASE_MODEL:", os.getenv("BASE_MODEL"))
+
+        print("[BioGPT] ADAPTERS:", self.model_name)
+        # Tokenizer from base
         self._tokenizer = AutoTokenizer.from_pretrained(
-            self.model_name, trust_remote_code=True, model_max_length=self.max_length
+            base_name, trust_remote_code=True, model_max_length=self.max_length
         )
         if self._tokenizer.pad_token is None and self._tokenizer.eos_token is not None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
+
+        # Base model
         self._model = AutoModelForCausalLM.from_pretrained(
-            self.model_name, torch_dtype=dtype, low_cpu_mem_usage=True, trust_remote_code=True
+            base_name, dtype="auto", low_cpu_mem_usage=True, trust_remote_code=True
         ).to(self.device)
+
+        # Attach LoRA adapters (saved in self.model_name)
+        try:
+            self._model = PeftModel.from_pretrained(self._model, self.model_name).to(self.device)
+            print("[BioGPT] LoRA adapters loaded.")
+            # Optional: merge for faster inference
+            # self._model = self._model.merge_and_unload()
+        except Exception as e:
+            print(f"[BioGPT] Warning: failed to load LoRA adapters from {self.model_name}: {e}. Using base only.")
+
         self._pad_token_id = self._tokenizer.eos_token_id or self._tokenizer.pad_token_id or 0
 
     def _build_prompt(self, prompt: str) -> str:
-        # Provide a JSON scaffold within guard tags to make extraction reliable.
+        fewshots = _read_fewshots(os.getenv("BIOGPT_FEWSHOTS", os.path.join(os.path.dirname(__file__), "diabetology_fewshots.jsonl")), limit=6)
         return (
             "You are a biomedical assistant specialized in diabetology.\n"
             "Return ONLY a JSON object with keys exactly: "
             '{"summary": string, "possible_diagnoses": string[], "rationale": string[], '
             '"recommended_tests": string[], "next_steps": string[], "warning_signs": string[]}. '
             "No extra text.\n\n"
+            f"{fewshots}\n"
             f"{JSON_BEGIN}\n"
             '{"summary": "...", "possible_diagnoses": ["..."], "rationale": ["..."], '
             '"recommended_tests": ["..."], "next_steps": ["..."], "warning_signs": ["..."]}\n'
@@ -57,6 +81,7 @@ class BioGPTModel(BaseMedicalModel):
             "Output must start with { and end with }.\n\n"
             f"Patient symptoms and history:\n{prompt}\n"
         )
+
 
     def generate_response(self, prompt: str, *, max_length: Optional[int]=None, temperature: float=0.0, **_: Any) -> Dict[str, Any]:
         if not self.ensure_model_loaded():
@@ -133,7 +158,7 @@ class BioGPTModel(BaseMedicalModel):
     def _parse_or_heuristic(self, raw: str) -> Dict[str, Any]:
         txt = (raw or "").strip()
 
-        # Attempt JSON parse from the provided string
+        # Try to find outermost JSON in txt
         start, end, depth = -1, -1, 0
         for i, ch in enumerate(txt):
             if ch == "{":

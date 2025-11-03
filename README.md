@@ -211,11 +211,24 @@ pnpm install
 3. Set up environment variables
 \`\`\`bash
 cp .env.example .env.local
+# Add the following to .env.local:
+# DIAGNOSAI_BACKEND_URL=http://localhost:8000
 \`\`\`
 
-4. Start the development server
+4. Start the backend server
 \`\`\`bash
-pnpm dev
+cd backend
+BIOGPT_MODEL_NAME=./biogpt-diabetology-custom uvicorn api.app:app --reload --port 8000
+\`\`\`
+
+5. Start the frontend development server (in a new terminal)
+\`\`\`bash
+npm run dev
+\`\`\`
+
+6. Test the API
+\`\`\`bash
+curl -X POST http://localhost:8000/api/biogpt -H "Content-Type: application/json" -d '{"question":"I have high blood sugar and fatigue"}'
 \`\`\`
 
 ## 🧠 Medical NLP Backend (FastAPI)
