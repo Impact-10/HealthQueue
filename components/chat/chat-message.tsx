@@ -110,6 +110,38 @@ export function ChatMessage({ message }: ChatMessageProps) {
   }
 
   const renderContentSections = (content: Record<string, unknown>) => {
+    // Handle BERT QA extractive answers
+    if (typeof content.answer === "string" && content.answer.trim()) {
+      return (
+        <div>
+          <MarkdownContent content={content.answer} />
+          {content.raw_answer && typeof content.raw_answer === "string" && content.raw_answer !== content.answer && (
+            <div className="mt-2 text-xs text-slate-400 italic">
+              Raw extracted span: "{content.raw_answer}"
+            </div>
+          )}
+          {typeof content.confidence === "number" && (
+            <div className="mt-2 text-xs text-slate-400">
+              Confidence: {(content.confidence * 100).toFixed(1)}%
+            </div>
+          )}
+          {Array.isArray(content.top_passages) && content.top_passages.length > 0 && (
+            <div className="mt-3 pt-3 border-t border-slate-700">
+              <div className="text-xs font-semibold text-slate-300 mb-2">Relevant passages:</div>
+              {content.top_passages.slice(0, 3).map((passage: any, idx: number) => (
+                <div key={idx} className="mb-2 pl-3 border-l-2 border-slate-600">
+                  <div className="text-xs text-slate-300">{passage.text}</div>
+                  <div className="text-xs text-slate-500 mt-1">
+                    Source: {passage.source} | Score: {(passage.score * 100).toFixed(1)}%
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )
+    }
+    
     const summaryValue = content.summary
     if (typeof summaryValue === "string" || summaryValue != null) {
       const summaryText = typeof summaryValue === "string"
@@ -325,6 +357,78 @@ export function ChatMessage({ message }: ChatMessageProps) {
           {message.role === "assistant"
             ? renderStructuredContent(message.structured)
             : <div className="whitespace-pre-wrap">{message.content}</div>}
+
+          {/* Source Citation for BERT QA responses */}
+          {message.role === "assistant" && message.structured && (
+            (() => {
+              const metadata = message.structured.metadata
+              const source = metadata?.source
+              if (source && typeof source === "object") {
+                const sourceLabel = source.label || source.source_type || "Medical Corpus"
+                const sourceQuestion = source.question
+                return (
+                  <div className="mt-3 pt-3 border-t border-slate-700">
+                    <div className="text-xs text-slate-400">
+                      <span className="font-semibold text-slate-300">Source:</span> {sourceLabel}
+                      {sourceQuestion && (
+                        <div className="mt-1 text-slate-500 italic">
+                          "{sourceQuestion.length > 100 ? sourceQuestion.substring(0, 100) + "..." : sourceQuestion}"
+                        </div>
+                      )}
+                      {source.retrieval_score && (
+                        <div className="mt-1 text-slate-500">
+                          Relevance: {(source.retrieval_score * 100).toFixed(1)}%
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )
+              }
+              return null
+            })()
+          )}
+
+          {/* Safety Warning */}
+          {message.role === "assistant" && message.structured && (
+            (() => {
+              const metadata = message.structured.metadata
+              const warning = metadata?.safety_warning
+              if (warning && typeof warning === "string") {
+                return (
+                  <div className="mt-3 p-2 bg-amber-900/30 border border-amber-700/50 rounded text-xs text-amber-200">
+                    ⚠️ {warning}
+                  </div>
+                )
+              }
+              return null
+            })()
+          )}
+
+          {/* Low Confidence Fallback - Top Passages */}
+          {message.role === "assistant" && message.structured && (
+            (() => {
+              const content = message.structured.content
+              if (content && typeof content === "object" && "top_passages" in content) {
+                const passages = (content as any).top_passages
+                if (Array.isArray(passages) && passages.length > 0) {
+                  return (
+                    <div className="mt-3 space-y-2">
+                      <div className="text-xs font-semibold text-slate-300">Top Retrieved Passages:</div>
+                      {passages.map((passage: any, idx: number) => (
+                        <div key={idx} className="p-2 bg-slate-900/50 rounded border border-slate-700 text-xs">
+                          <div className="text-slate-300 mb-1">{passage.text}</div>
+                          <div className="text-slate-500 mt-1">
+                            Source: {passage.source || "Medical Corpus"} (Rank: {passage.rank})
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )
+                }
+              }
+              return null
+            })()
+          )}
 
           {message.file_urls && message.file_urls.length > 0 && (
             <div className="mt-2 space-y-1">

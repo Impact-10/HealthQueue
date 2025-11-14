@@ -1,0 +1,32 @@
+patient	1
+pain	1
+pressure	1
+chest	1
+heart	1
+diabetes	1
+hypertension	1
+infarction	1
+therapy	1
+treatment	1
+assessment	1
+blood	1
+shortness	1
+breath	1
+disease	1
+infection	1
+injury	1
+fever	1
+nausea	1
+cough	1
+shortness of breath	1
+complains of	1
+blood pressure	1
+coronary artery disease	1
+fracture	1
+history	1
+diagnosis	1
+workup	1
+hypertension	1
+patient	1
+myocardial infarction	1
+diabetes	1

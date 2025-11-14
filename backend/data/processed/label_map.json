@@ -1,0 +1,25 @@
+{
+  "num_classes": 9,
+  "classes": [
+    "1_CancerGov_QA",
+    "2_GARD_QA",
+    "3_GHR_QA",
+    "4_MPlus_Health_Topics_QA",
+    "5_NIDDK_QA",
+    "6_NINDS_QA",
+    "7_SeniorHealth_QA",
+    "8_NHLBI_QA_XML",
+    "9_CDC_QA"
+  ],
+  "encoding": {
+    "1_CancerGov_QA": 0,
+    "2_GARD_QA": 1,
+    "3_GHR_QA": 2,
+    "4_MPlus_Health_Topics_QA": 3,
+    "5_NIDDK_QA": 4,
+    "6_NINDS_QA": 5,
+    "7_SeniorHealth_QA": 6,
+    "8_NHLBI_QA_XML": 7,
+    "9_CDC_QA": 8
+  }
+}

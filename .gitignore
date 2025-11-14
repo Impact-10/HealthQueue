@@ -38,15 +38,53 @@ venv/
 ENV/
 env/
 .env
+*.pyc
 
-# Model cache and data
+# Python virtual environment
+backend/.venv/
+backend/venv/
+
+# Model cache and large model files
 model_cache/
-backend/data/
 *.bin
 *.safetensors
 *.gguf
 *.pt
 *.pth
+
+# BERT trained models (417 MB - too large for git)
+backend/bert-medqa-custom/
+backend/bert-custom-model/
+backend/models/bert_medical_classifier/
+
+# Large training data files
+backend/data/processed/*.csv
+backend/data/squad/*.json
+backend/data/mtsamples.csv
+backend/data/medquad_raw/
+!backend/data/processed/.gitkeep
+
+# Embeddings and cache
+backend/embeddings/
+*_cache/
+*.cache
+
+# Training checkpoints
+checkpoint_*/
+backend/checkpoint_*/
+
+# Logs and output files
+*.log
+uvicorn.log
+training_*.txt
+*.txt.log
+
+# Analysis output (generated files)
+backend/roc_analysis/*.png
+backend/roc_analysis/*.txt
+
+# Zip archives
+*.zip
 
 # IDE
 .vscode/
@@ -58,3 +96,7 @@ backend/data/
 # OS
 .DS_Store
 Thumbs.db
+*.tmp
+
+# Supabase local
+.supabase/

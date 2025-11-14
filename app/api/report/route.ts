@@ -1,8 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createClient } from "@/lib/supabase/server"
-import { GoogleGenerativeAI } from "@google/generative-ai"
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!)
 
 const REPORT_SYSTEM_PROMPT = `You are a medical summary assistant. Create a concise, clinically useful encounter-style report for a licensed healthcare professional based on the patient's chat thread. Follow this structure:
 
@@ -75,12 +72,11 @@ export async function POST(req: NextRequest) {
 
     const profileContext = `Patient Context:\n- Age: ${age ?? 'not mentioned'}\n- Gender: ${profile?.gender || 'not mentioned'}\n- Conditions: ${profile?.medical_conditions?.join(', ') || 'not mentioned'}\n- Medications: ${profile?.medications?.join(', ') || 'not mentioned'}\n- Allergies: ${profile?.allergies?.join(', ') || 'not mentioned'}\n- Activity Level: ${profile?.activity_level || 'not mentioned'}\n- Goals: ${profile?.health_goals?.join(', ') || 'not mentioned'}`
 
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" })
-    const fullPrompt = `${REPORT_SYSTEM_PROMPT}\n\n${profileContext}\n\nConversation Transcript:\n${conversationText}`
-    const result = await model.generateContent(fullPrompt)
-    const report = result.response.text()
-
-    return NextResponse.json({ report })
+    // Report generation using Gemini is no longer available
+    // This feature has been removed as part of BERT-only cleanup
+    return NextResponse.json({ 
+      error: "Report generation is not available. This feature has been removed." 
+    }, { status: 501 })
   } catch (e) {
     console.error('Report generation error', e)
     return NextResponse.json({ error: "Failed to generate report" }, { status: 500 })

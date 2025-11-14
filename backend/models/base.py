@@ -7,7 +7,16 @@ import time
 
 import torch
 
-from ..config import get_model_mode, is_inference_enabled
+try:
+    from config import get_model_mode, is_inference_enabled
+except ImportError:
+    # Fallback for when run from api/
+    import sys
+    from pathlib import Path
+    backend_dir = Path(__file__).resolve().parent.parent
+    if str(backend_dir) not in sys.path:
+        sys.path.insert(0, str(backend_dir))
+    from config import get_model_mode, is_inference_enabled
 
 
 class BaseMedicalModel(ABC):

@@ -2,7 +2,17 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
-from backend.models import MedAlpacaModel
+import sys
+from pathlib import Path
+
+# Add parent directory to path for relative imports
+backend_dir = Path(__file__).resolve().parent.parent
+if str(backend_dir) not in sys.path:
+    sys.path.insert(0, str(backend_dir))
+
+from utils.retriever import search as medquad_search, hybrid_search
+from utils import qa_inference
+from utils.safety_filter import check_safety
 
 app = FastAPI(title="HealthQueue Medical AI API")
 
@@ -15,166 +25,65 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize models lazily
-models = {}
+# BERT QA model is initialized lazily in qa_inference module
 
-# Function to get or initialize model
-def get_model(model_name: str):
-    # Only MedAlpaca and Gemini supported
-    if model_name not in models:
-        if model_name == "medalpaca":
-            from backend.models import MedAlpacaModel
-            models[model_name] = MedAlpacaModel()
-        elif model_name == "biogpt":
-            from backend.models import BioGPTModel
-            models[model_name] = BioGPTModel()
-        elif model_name == "gemini":
-            class GeminiModel:
-                def generate_response(self, prompt, **kwargs):
-                    return {"summary": "Gemini API integration not implemented in backend yet."}
-                def get_model_info(self):
-                    return {"gemini": True}
-            models[model_name] = GeminiModel()
+def _make_conversational(question: str, answer: str) -> str:
+    """Wrap extracted answer span in natural conversational template.
+    
+    Makes raw BERT extractions feel more like a doctor's response.
+    """
+    q_lower = question.lower().strip()
+    
+    # Detect question type and choose appropriate intro
+    if any(word in q_lower for word in ["what is", "what are", "what's"]):
+        if answer[0].isupper():  # Already starts with proper noun/sentence
+            return answer
         else:
-            raise ValueError(f"Unknown model: {model_name}")
-    return models[model_name]
+            return f"That refers to {answer}"
+    
+    elif any(word in q_lower for word in ["how to", "how do", "how can"]):
+        if "treat" in q_lower or "cure" in q_lower:
+            return f"Treatment typically involves: {answer}"
+        else:
+            return f"Here's how: {answer}"
+    
+    elif any(word in q_lower for word in ["what causes", "why does", "what leads to"]):
+        return f"The main cause is: {answer}"
+    
+    elif any(word in q_lower for word in ["symptom", "sign", "feel"]):
+        return f"Common symptoms include: {answer}"
+    
+    elif "when" in q_lower or "how long" in q_lower:
+        return f"Typically, {answer}"
+    
+    else:
+        # Generic: just clean up the answer
+        return answer if answer[0].isupper() else answer.capitalize()
 
+# BERT QA model is accessed via qa_inference module
 
-def simple_payload(
-    *,
-    question: Optional[str] = None,
-    answer: Optional[str] = None,
-    model_key: str,
-    structured: Dict[str, Any],
-) -> Dict[str, Any]:
-    mode = structured.get("mode")
-    metadata = structured.get("metadata", {})
-    model_info = {
-        "key": model_key,
-        "name": metadata.get("model_name") or model_key,
-        "mode": mode,
-        "badge": metadata.get("model_name") or model_key,
-    }
-    payload: Dict[str, Any] = {
-        "model": model_info,
-        "mode": mode,
-        "structuredResponse": structured,
-    }
-    if question is not None:
-        payload["question"] = question
-    if answer is not None:
-        payload["answer"] = answer
-    return payload
-
-
-def extract_primary_answer(structured: Dict[str, Any]) -> str:
-    content = structured.get("content")
-    if not isinstance(content, dict):
-        return ""
-
-    prioritized_keys = [
-        "summary",
-        "answer",
-        "text",
-        "description",
-    ]
-    for key in prioritized_keys:
-        value = content.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-
-    list_keys = [
-        "possible_causes",
-        "possible_diagnoses",
-        "recommendations",
-        "follow_up_questions",
-        "warning_signs",
-    ]
-    for key in list_keys:
-        value = content.get(key)
-        if isinstance(value, list) and value:
-            return ", ".join(str(item) for item in value[:3])
-
-    if "entities" in content and isinstance(content["entities"], dict):
-        entities = content["entities"]
-        parts: List[str] = []
-        for etype, values in entities.items():
-            if isinstance(values, list) and values:
-                parts.append(f"{etype}: {', '.join(str(v) for v in values[:3])}")
-        if parts:
-            return " | ".join(parts)
-
-    if "record_analysis" in content and isinstance(content["record_analysis"], list):
-        entries = content["record_analysis"]
-        if entries:
-            first = entries[0]
-            if isinstance(first, dict):
-                question = first.get("question")
-                result = first.get("result")
-                if isinstance(result, dict):
-                    answer = result.get("content")
-                    if isinstance(answer, dict):
-                        text = answer.get("answer")
-                        if isinstance(text, str) and text.strip():
-                            return text.strip()
-                if isinstance(question, str) and question.strip():
-                    return question.strip()
-
-    return ""
 
 # Request/Response Models
-class DiagnosisRequest(BaseModel):
-    symptoms: str
-    medical_history: Optional[str] = None
-    model_name: str = "ensemble"
-    additional_context: Optional[Dict[str, Any]] = None
+class SearchRequest(BaseModel):
+    query: str
+    k: Optional[int] = 5
 
-
-class QuestionRequest(BaseModel):
+class QARequest(BaseModel):
     question: str
-    max_length: Optional[int] = None
-    temperature: Optional[float] = None
-
-
-class ClinicalQARequest(BaseModel):
-    question: str
-    context: str
-    questions: Optional[List[str]] = None
-
-
-class EntitiesRequest(BaseModel):
-    text: str
-    threshold: Optional[float] = 0.5
-
-class EntityExtractionRequest(BaseModel):
-    text: str
-    model_name: str = "pubmedbert"
-
-class AnalysisRequest(BaseModel):
-    clinical_record: str
-    questions: Optional[List[str]] = None
-    model_name: str = "longformer"
-
-class PopulationHealthRequest(BaseModel):
-    diagnoses: List[Dict[str, Any]]
+    k: Optional[int] = 10  # Retrieve more passages for better results (was 5)
+    alpha: Optional[float] = 0.6  # Weight semantic search higher (was 0.5)
+    confidence_threshold: Optional[float] = 0.1  # Minimum confidence to return answer
+    max_answer_length: Optional[int] = 150  # Longer answers (was 100)
 
 # API Routes
 @app.get("/")
 async def root():
     """API root endpoint"""
-    available_models = [
-        "medalpaca",
-        "biogpt",
-        "longformer", 
-        "pubmedbert",
-        "ensemble"
-    ]
     return {
         "name": "HealthQueue Medical AI API",
         "version": "1.0",
         "models": {
-            name: "initialized" if name in models else "available"
-            for name in available_models
+            "bert_qa": "available"
         },
         "status": "operational"
     }
@@ -184,227 +93,206 @@ async def root():
 async def healthcheck():
     """Lightweight health endpoint for monitoring."""
     response = {"status": "ok", "models": {}}
-    for name in ["medalpaca", "biogpt", "longformer", "pubmedbert", "ensemble"]:
-        model = get_model(name)
-        info = model.get_model_info()
-        response["models"][name] = {
-            "mode": info.get("mode"),
-            "initialized": info.get("is_initialized"),
-        }
+    
+    # Check BERT QA model
+    try:
+        qa_info = qa_inference.get_model_info()
+        response["models"]["bert_qa"] = qa_info
+    except Exception as e:
+        response["models"]["bert_qa"] = {"error": str(e)}
+    
     return response
 
 
-@app.post("/api/medalpaca")
-async def medalpaca_endpoint(request: QuestionRequest):
-    """Direct question/answer endpoint backed by MedAlpaca-7B."""
-
-    model = get_model("medalpaca")
-    kwargs: Dict[str, Any] = {}
-    if request.max_length is not None:
-        kwargs["max_length"] = request.max_length
-    if request.temperature is not None:
-        kwargs["temperature"] = request.temperature
+@app.post("/api/medquad/search")
+async def medquad_search_endpoint(req: SearchRequest):
+    """Semantic keyword-based search over MedQuAD Q&A (TF-IDF cosine)."""
     try:
-        structured = model.generate_response(request.question, **kwargs)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001 - surface unexpected failures
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    answer = extract_primary_answer(structured)
-    return simple_payload(
-        question=request.question,
-        answer=answer,
-        model_key="medalpaca",
-        structured=structured,
-    )
-
-
-@app.post("/api/biogpt")
-async def biogpt_endpoint(request: QuestionRequest):
-    """Biomedical differential diagnosis endpoint backed by BioGPT."""
-
-    model = get_model("biogpt")
-    kwargs: Dict[str, Any] = {}
-    if request.max_length is not None:
-        kwargs["max_length"] = request.max_length
-    if request.temperature is not None:
-        kwargs["temperature"] = request.temperature
-    try:
-        structured = model.generate_response(
-            request.question,
-            **kwargs,
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    answer = extract_primary_answer(structured)
-    return simple_payload(
-        question=request.question,
-        answer=answer,
-        model_key="biogpt",
-        structured=structured,
-    )
-
-
-@app.post("/api/clinical_longformer")
-async def clinical_longformer_endpoint(request: ClinicalQARequest):
-    """Clinical QA endpoint backed by Clinical-Longformer."""
-
-    model = get_model("longformer")
-    try:
-        if request.questions:
-            structured = model.analyze_clinical_record(request.context, request.questions)
-        else:
-            structured = model.answer_question(request.context, request.question)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    answer = extract_primary_answer(structured)
-    return simple_payload(
-        question=request.question,
-        answer=answer,
-        model_key="longformer",
-        structured=structured,
-    )
-
-
-@app.post("/api/pubmedbert")
-async def pubmedbert_endpoint(request: EntitiesRequest):
-    """Biomedical entity extraction endpoint backed by PubMedBERT."""
-
-    model = get_model("pubmedbert")
-    threshold = request.threshold if request.threshold is not None else 0.5
-    try:
-        structured = model.extract_entities(request.text, threshold=threshold)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    answer = extract_primary_answer(structured)
-    response = simple_payload(
-        question=request.text,
-        answer=answer,
-        model_key="pubmedbert",
-        structured=structured,
-    )
-    response["entities"] = structured.get("content", {}).get("entities", {})
-    response["threshold"] = threshold
-    return response
-
-@app.post("/api/diagnosis")
-async def get_diagnosis(request: DiagnosisRequest):
-    """Get medical diagnosis from specified model"""
-    try:
-        model = get_model(request.model_name)
-        
-        if request.model_name == "ensemble":
-            result = model.get_ensemble_diagnosis(
-                request.symptoms,
-                request.medical_history,
-                **(request.additional_context or {})
-            )
-        elif request.model_name == "biogpt":
-            result = model.generate_diagnosis(
-                request.symptoms,
-                request.medical_history,
-                **(request.additional_context or {})
-            )
-        else:
-            result = model.generate_response(
-                f"Symptoms: {request.symptoms}\n" +
-                f"Medical History: {request.medical_history or 'None'}",
-                **(request.additional_context or {})
-            )
-
+        result = medquad_search(req.query, k=req.k or 5)
         return result
-
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
-
-@app.post("/api/entities")
-async def extract_entities(request: EntityExtractionRequest):
-    """Extract medical entities from text"""
-    try:
-        if request.model_name not in ["pubmedbert", "ensemble"]:
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid model for entity extraction"
-            )
-
-        model = get_model(request.model_name)
-        if request.model_name == "pubmedbert":
-            result = model.extract_entities(request.text)
-        else:
-            result = model.models["pubmedbert"].extract_entities(request.text)
-
-        return result
-
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
-
-@app.post("/api/analyze")
-async def analyze_clinical_record(request: AnalysisRequest):
-    """Analyze clinical records"""
-    try:
-        if request.model_name not in ["longformer", "ensemble"]:
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid model for clinical analysis"
-            )
-
-        model = get_model(request.model_name)
-
-        if request.model_name == "longformer":
-            if request.questions:
-                result = model.analyze_clinical_record(
-                    request.clinical_record,
-                    request.questions,
-                )
-            else:
-                result = model.extract_clinical_insights(request.clinical_record)
-        else:
-            result = model.models["longformer"].extract_clinical_insights(
-                request.clinical_record
-            )
-
-        return result
-
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
-
-@app.post("/api/population-health")
-async def analyze_population_health(request: PopulationHealthRequest):
-    """Analyze population health trends"""
-    try:
-        ensemble = get_model("ensemble")
-        result = ensemble.analyze_population_health(request.diagnoses)
-        return result
-
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/model-info/{model_name}")
-async def get_model_info(model_name: str):
-    """Get information about a specific model"""
-    try:
-        model = get_model(model_name)
-        return model.get_model_info()
 
+@app.post("/api/qa")
+async def qa_endpoint(req: QARequest):
+    """Complete QA pipeline: retrieval → BERT QA → ranked answers.
+    
+    Flow:
+    1. Safety check: filter unsafe/inappropriate queries
+    2. Retrieve top-k passages using hybrid search (lexical + semantic)
+    3. Run fine-tuned BERT QA on each passage to extract answer spans
+    4. Rank by confidence score
+    5. Return best answer + source passage + metadata
+    6. If confidence below threshold, return retrieved passages instead
+    """
+    try:
+        # Step 0: Safety check (BEFORE any expensive operations)
+        is_safe, safety_reason, severity = check_safety(req.question)
+        if not is_safe:
+            # Return immediately - don't do retrieval/QA
+            return {
+                "question": req.question,
+                "answer": None,
+                "confidence": 0.0,
+                "mode": "blocked",
+                "message": safety_reason or "Query blocked by safety filter",
+                "severity": severity,
+            }
+        
+        # Add warning to response if needed
+        safety_warning = safety_reason if severity == "warning" else None
+        
+        # Step 1: Retrieve relevant passages (only if query passed safety check)
+        # Use smaller k for faster retrieval (can increase if needed)
+        retrieval_k = min(req.k or 5, 10)  # Cap at 10 for performance
+        # Disable semantic search by default for speed - lexical-only is fast and reliable
+        retrieval_result = hybrid_search(
+            query=req.question,
+            k=retrieval_k,
+            alpha=req.alpha or 0.5,
+            timeout=2.0,
+            use_semantic=False,  # Disable semantic for now - too slow, lexical works fine
+        )
+        
+        if not retrieval_result.get("results"):
+            return {
+                "question": req.question,
+                "answer": None,
+                "confidence": 0.0,
+                "mode": "no_results",
+                "message": "No relevant passages found in corpus",
+                "retrieval": retrieval_result,
+            }
+        
+        # Extract passage texts (use ONLY 'answer' field from retrieved Q&A pairs)
+        # IMPORTANT: Don't include the retrieved question, as BERT will extract it instead of the answer
+        contexts = []
+        for r in retrieval_result["results"]:
+            # Use only the answer as context for QA extraction
+            answer_text = r.get("answer", "").strip()
+            if answer_text:
+                contexts.append(answer_text)
+            else:
+                # Fallback: if no answer, use full text
+                ctx_parts = []
+                if r.get("question"):
+                    ctx_parts.append(r["question"])
+                contexts.append(" ".join(ctx_parts) if ctx_parts else "")
+        
+        # Step 2: Run BERT QA on each passage (limit to top 3 for performance)
+        # Process fewer contexts to avoid timeouts
+        contexts_to_process = contexts[:3]  # Only top 3 for speed
+        qa_results = qa_inference.batch_predict(
+            question=req.question,
+            contexts=contexts_to_process,
+            max_answer_length=req.max_answer_length or 100,
+            max_contexts=3,  # Reduced from 5
+        )
+        
+        if not qa_results:
+            return {
+                "question": req.question,
+                "answer": None,
+                "confidence": 0.0,
+                "mode": "qa_failed",
+                "message": "QA model could not extract answer from passages",
+                "retrieval": retrieval_result,
+            }
+        
+        # Step 3: Check confidence threshold
+        best_answer = qa_results[0]
+        confidence_threshold = req.confidence_threshold or 0.1
+        
+        if best_answer["confidence"] < confidence_threshold:
+            # Low confidence: return retrieved passages as fallback with citations
+            top_passages = []
+            for idx, r in enumerate(retrieval_result["results"][:5]):  # Top 5 passages
+                passage_text = r.get("answer", "") or r.get("question", "")
+                if passage_text:
+                    top_passages.append({
+                        "text": passage_text[:500],  # Truncate for display
+                        "source": r.get("label_name") or r.get("source", "unknown"),
+                        "rank": r.get("rank", idx + 1),
+                        "score": r.get("score", 0.0),
+                    })
+            
+            response = {
+                "question": req.question,
+                "answer": None,
+                "confidence": best_answer["confidence"],
+                "mode": "low_confidence",
+                "message": f"Answer confidence {best_answer['confidence']:.3f} below threshold {confidence_threshold}. Showing top retrieved passages instead.",
+                "top_passages": top_passages,
+                "retrieval": retrieval_result,
+                "qa_attempts": qa_results[:3],  # show top 3 attempts
+            }
+            
+            # Add safety warning if present
+            if safety_warning:
+                response["safety_warning"] = safety_warning
+            
+            return response
+        
+        # Step 4: Return successful answer with source
+        source_idx = best_answer["context_idx"]
+        source_passage = retrieval_result["results"][source_idx]
+        
+        # Wrap answer in conversational template
+        raw_answer = best_answer["answer"]
+        conversational_answer = _make_conversational(req.question, raw_answer)
+        
+        response = {
+            "question": req.question,
+            "answer": conversational_answer,
+            "raw_answer": raw_answer,  # Keep original for debugging
+            "confidence": best_answer["confidence"],
+            "score": best_answer["score"],
+            "mode": "success",
+            "source": {
+                "question": source_passage.get("question"),
+                "answer": source_passage.get("answer"),
+                "label": source_passage.get("label_name"),
+                "retrieval_score": source_passage.get("score"),
+                "retrieval_rank": source_passage.get("rank"),
+                "source_type": source_passage.get("source", "unknown"),
+            },
+            "alternative_answers": qa_results[1:3] if len(qa_results) > 1 else [],  # top 2-3 alternatives
+            "retrieval": {
+                "normalized_query": retrieval_result.get("normalized_query"),
+                "semantic_enabled": retrieval_result.get("semantic_enabled"),
+                "total_retrieved": len(retrieval_result["results"]),
+            },
+        }
+        
+        # Add safety warning if present
+        if safety_warning:
+            response["safety_warning"] = safety_warning
+        
+        return response
+        
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        import traceback
+        raise HTTPException(
+            status_code=500,
+            detail=f"QA pipeline error: {str(e)}\n{traceback.format_exc()}",
+        )
+
+
+@app.get("/api/model-info/bert-qa")
+async def get_model_info():
+    """Get information about BERT QA model"""
+    try:
+        return qa_inference.get_model_info()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    

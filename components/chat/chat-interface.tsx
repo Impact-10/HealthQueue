@@ -34,6 +34,11 @@ interface ChatInterfaceProps {
 
 const MODEL_OPTIONS = [
   {
+    value: "bert-qa",
+    label: "BERT QA (Extractive)",
+    description: "Fast extractive QA with medical corpus retrieval - trained on MedQuAD.",
+  },
+  {
     value: "distilgpt2",
     label: "MedAlpaca (DistilGPT-2)",
     description: "Fast, lightweight open-source model for medical Q&A.",
@@ -50,13 +55,14 @@ const MODEL_OPTIONS = [
   },
 ] as const;
 
-type ModelKey = "distilgpt2" | "gemini" | "biogpt"; // add biogpt
-const DEFAULT_MODEL: ModelKey = "distilgpt2";
+type ModelKey = "bert-qa" | "distilgpt2" | "gemini" | "biogpt";
+const DEFAULT_MODEL: ModelKey = "bert-qa";  // Use BERT QA as default
 
 const MODEL_LOOKUP: Record<ModelKey, (typeof MODEL_OPTIONS)[number]> = {
-  distilgpt2: MODEL_OPTIONS[0],
-  gemini: MODEL_OPTIONS[1],
-  biogpt: MODEL_OPTIONS[2],
+  "bert-qa": MODEL_OPTIONS[0],
+  distilgpt2: MODEL_OPTIONS[1],
+  gemini: MODEL_OPTIONS[2],
+  biogpt: MODEL_OPTIONS[3],
 };
 
 
@@ -338,18 +344,27 @@ export function ChatInterface({ userId, threadId, onNewThread }: ChatInterfacePr
         return
       }
 
+      if (response.status === 400) {
+        // Blocked query or bad request
+        const errorData = await response.json()
+        setRateLimitError(errorData.error || "Query was blocked or invalid")
+        setMessages((prev) => prev.slice(0, -1))
+        return
+      }
+
       if (!response.ok) {
-  let detail = "Failed to send message";
-  try {
-    const err = await response.json();
-    detail = err?.error || err?.body || JSON.stringify(err);
-  } catch {
-    try { detail = await response.text(); } catch {}
-  }
-  console.error("Chat API 502 detail:", detail);
-  setRateLimitError(typeof detail === "string" ? detail : "Service unavailable");
-  throw new Error(detail);
-}
+        let detail = "Failed to send message";
+        try {
+          const err = await response.json();
+          detail = err?.error || err?.body || JSON.stringify(err);
+        } catch {
+          try { detail = await response.text(); } catch {}
+        }
+        console.error("Chat API error:", detail);
+        setRateLimitError(typeof detail === "string" ? detail : "Service unavailable");
+        setMessages((prev) => prev.slice(0, -1))
+        return
+      }
       const data = await response.json()
 
       const directAnswer = typeof data.directAnswer === "string" && data.directAnswer.trim().length > 0
